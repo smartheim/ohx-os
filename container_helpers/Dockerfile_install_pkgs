@@ -1,0 +1,20 @@
+FROM multiarch/qemu-user-static:latest as stage0
+ARG REPOSITORY=https://alpha.de.repo.voidlinux.org
+RUN ARCH=x86_64 && wget ${REPOSITORY}/static/xbps-static-latest.${ARCH}-musl.tar.xz -O file.tar.xz && mkdir ${ARCH} && tar xJf file.tar.xz -C ${ARCH} && rm file.tar.xz
+
+RUN echo "Y" | XBPS_ARCH=x86_64-musl XBPS_TARGET_ARCH=x86_64-musl \
+    SSL_NO_VERIFY_HOSTNAME=1 SSL_NO_VERIFY_PEER=1 \
+    /x86_64/usr/bin/xbps-install.static -yS \
+    --repository=${REPOSITORY}/current/musl \
+    -r /target/x86_64
+
+RUN echo "Y" | XBPS_ARCH=aarch64-musl XBPS_TARGET_ARCH=aarch64-musl \
+    SSL_NO_VERIFY_HOSTNAME=1 SSL_NO_VERIFY_PEER=1 \
+    /x86_64/usr/bin/xbps-install.static -yS \
+    --repository=${REPOSITORY}/current/aarch64  \
+    -r /target/aarch64
+ENV ARCH x86_64
+VOLUME ["/work"]
+COPY install_pkgs_intern.sh /run.sh
+RUN chmod a+x /run.sh
+ENTRYPOINT ["/run.sh"]

@@ -1,9 +1,11 @@
-# 
+# Credentials
 docker_credentials.inc
+github_credentials.inc
 
 # Temporary directories
 image_root*
 *_mount
+voidlinux
 
 # Dont't commit image files
 *.zip

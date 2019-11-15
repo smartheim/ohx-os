@@ -1,0 +1,12 @@
+#!/bin/bash
+set -e
+
+if [ -f done ]; then
+    exit
+fi
+
+for f in *.sh; do
+    [ -r $f ] && . $f
+done
+
+touch done

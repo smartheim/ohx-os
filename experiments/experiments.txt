@@ -1,0 +1,80 @@
+libguestfs-tools-c
+
+guestmount
+
+fdisk -l openSUSE-MicroOS.aarch64-RaspberryPi.raw
+
+udisksctl loop-setup -f openSUSE-MicroOS.aarch64-RaspberryPi.raw
+
+/run/media/$(whoami)/ROOT
+
+https://files.resin.io/resinos/raspberrypi3/2.43.0%2Brev1.dev/image/balena.img.zip
+unzip balena.img.zip
+
+
+ sudo btrfs subvolume list ./boot_mount                                                                                                ✔  1034  22:47:04 
+ID 256 gen 17 top level 5 path @
+ID 257 gen 19 top level 256 path @/.snapshots
+ID 258 gen 30 top level 257 path @/.snapshots/1/snapshot
+ID 259 gen 19 top level 256 path @/home
+ID 260 gen 74 top level 256 path @/opt
+ID 261 gen 26 top level 256 path @/root
+ID 262 gen 72 top level 256 path @/srv
+ID 263 gen 30 top level 256 path @/tmp
+ID 264 gen 50 top level 256 path @/var
+ID 265 gen 70 top level 256 path @/boot/writable
+ID 266 gen 75 top level 256 path @/usr/local
+ID 267 gen 76 top level 256 path @/boot/grub2/arm64-efi
+
+-----------------
+dd if=/dev/zero bs=2M count=200 > binary.img
+fdisk -lu binary.img
+
+# Alternative: sudo kpartx -a binary.img
+losetup --partscan --show --find binary.img
+> /dev/loop0
+mkfs -t ext4 -L img1 /dev/loop0p1
+mkdir -p /mnt/img1
+mount /dev/loop0p1 /mnt/img1
+
+umount /mnt/img1
+# Alternative: sudo kpartx -d binary.img
+losetup -d /dev/loop0
+
+
+
+loop-mount-partitions() (
+  set -e
+  img="$1"
+  dev="$(sudo losetup --show -f -P "$img")"
+  echo "$dev" | sed -E 's/.*[^[:digit:]]([[:digit:]]+$)/\1/g'
+  for part in "${dev}p"*; do
+    if [ "$part" = "${dev}p*" ]; then
+      # Single partition image.
+      part="${dev}"
+    fi
+    dst="/mnt/$(basename "$part")"
+    echo "$dst" 1>&2
+    sudo mkdir -p "$dst"
+    sudo mount "$part" "$dst"
+  done
+)
+loop-unmount-partitions() (
+  set -e
+  for loop_id in "$@"; do
+    dev="/dev/loop${loop_id}"
+    for part in "${dev}p"*; do
+      if [ "$part" = "${dev}p*" ]; then
+        part="${dev}"
+      fi
+      dst="/mnt/$(basename "$part")"
+      sudo umount "$dst"
+    done
+    sudo losetup -d "$dev"
+  done
+)
+
+loop_id="$(loop-mount-partitions "$img_file")"
+sudo cmp /mnt/loop0p1/file-1 "${root_dir_1}/file-1"
+sudo cmp /mnt/loop0p2/file-2 "${root_dir_2}/file-2"
+loop-unmount-partitions "$loop_id"

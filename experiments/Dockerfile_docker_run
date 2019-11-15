@@ -1,0 +1,6 @@
+FROM docker://docker:dind
+VOLUME ["/var/lib/docker"]
+ENV ARCH x86_64
+COPY docker_pull_intern.sh /run.sh
+RUN chmod a+x /run.sh
+ENTRYPOINT ["/run.sh"]
