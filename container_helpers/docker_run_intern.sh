@@ -10,7 +10,7 @@ fi
 [ "$ARCH" == "armv7l" ] && ARCH=arm
 
 case $ARCH in
-    amd64|arm64|arm) echo "For Architecture: $ARCH";;
+    amd64|arm64|arm) ;;
     *)             echo "Architecture invalid"; exit 1 ;;
 esac
 
@@ -19,19 +19,19 @@ mkdir -p ~/.docker
 
 echo '{"experimental":true}' > /etc/docker/daemon.json
 echo '{"experimental":"enabled"}' > ~/.docker/config.json
-dockerd-entrypoint.sh &
+dockerSocket='unix:///var/run/docker.sock'
+dockerd -s overlay2 --host="$dockerSocket" -l error | grep -v 'Could not mount' | grep -v 'AppArmor detection' &
 for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15
 do
 	if [ -S /var/run/docker.sock ]; then
-		echo "Docker daemon ready. Install containers"
 		sleep 1
 		for var in "$@"
 		do
-			set +e
-			docker image rm "$var" > /dev/null
-			set -e
-			docker pull --platform="linux/$ARCH"  "$var"
-			echo -n "Inspect $var: "
+			#set +e
+			#docker image rm "$var" > /dev/null 2>&1
+			#set -e
+			docker pull --platform="linux/$ARCH"  "$var" > /dev/null
+			echo -n "Provisioned $var: "
 			docker inspect --format="{{.Architecture}}" "$var"
 		done
 		kill %1

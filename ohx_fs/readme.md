@@ -1,15 +1,7 @@
 # OHX Root FS
 
-This directory structure is located on its own partition and is read/write mounted.
-
-## First Boot Provisioning
-
-Some software packages and containers need to be installed and some scripts to be started on the very first boot.
-Those can be found in the "provisioning" directory.
-
-As soon as all software packages are installed
-and docker containers imported a file "done" is created within that directory.
-The startup service will not perform those actions again when that file is found.
+This directory structure is located on its own partition and is read/write mounted on /var.
+All OHX specific directories and files are located in ./ohx.
 
 ## File access
 * Only root can access the "provisioning" directory.
