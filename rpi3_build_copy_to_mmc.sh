@@ -4,7 +4,7 @@
 : "${ARCH:=aarch64}"
 : "${MACHINE:=rpi3}"
 
-BASEIMG="voidlinux/ohx-$MACHINE.img"
+BASEIMG="voidlinux/ohx-$MACHINE-$ARCH.img"
 
 if [ ! -b $TARGET ]; then
    echo "Target not readable: $TARGET"
@@ -12,12 +12,12 @@ if [ ! -b $TARGET ]; then
 fi
 
 if [ ! -f $BASEIMG ]; then
-   ARCH=$ARCH MACHINE=$MACHINE SKIP_COMPRESSION=true sh build_one_arch.sh
+   SKIP_COMPRESSION=true sh build_one_arch.sh $MACHINE $ARCH
 fi
 
 # Unmount
 set +e
-sudo umount ${TARGET}* > /dev/null &2>1
+sudo umount ${TARGET}* > /dev/null 2>&1
 set -e
 
 IMAGESIZE=$(ls -lh $BASEIMG|awk '{print $5}')

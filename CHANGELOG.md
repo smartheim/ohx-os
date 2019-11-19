@@ -9,6 +9,6 @@ First release
 * Deploy / Release scripts
 * Provisioning scripts
 * Base Image
-* Additional packets: Docker, connman, avahi
+* Additional packets: Docker, NetworkManager, avahi
 * Additional containers: Portainer, netdata, wifi-captive
-* User: root/ohx
+* User: root/ohxsmarthome

@@ -11,12 +11,12 @@ The images are deployed to the Github releases page of this repo.
 Supported systems are:
 * Any UEFI equiped x86-64 system like the Intel NUC
 * Any UEFI equiped aarch64 system
-* The Raspberry PI 3 and 4
+* The Raspberry PI 2, 3 and 4
 * The ODroid C2
 * The Cubieboard and Beagleboard
 
-For System-On-A-Chip (SoC) hardware you require an SD-Card or µSD-Card with >= 512 MB capacity.
-
+For System-On-A-Chip (SoC) hardware you require an SD-Card or µSD-Card with >= 1 GB capacity.
+UEFI systems require a storage medium with at least 2 GB.
 
 ## Installation
 
@@ -47,7 +47,7 @@ on the captive portal web-page.
 **SSH and local access:**
 The log-in user is called "root" with a default password *"ohxsmarthome"*.
 The sytem announces itself also as "ohx.local" and "ohx_ID.local" (with ID being a unique ID) on your network.
-Your host system must understand Avahi/Bonjour Service Discovery for this local domanin name resolution to work.
+Your host system must understand Avahi/Bonjour Service Discovery for this local domain name resolution to work.
 
 You rarely want to login to your system though.
 You extend your installation via software containers and not via local packages.
@@ -74,28 +74,33 @@ The operating system is based on [Void Linux](https://voidlinux.org/) and comes 
 All exciting apps and services run in software containers.
 
 The system consists of three partitions:
-A small FAT based one with the boot code and kernel, a second, read-only ext2 based one for the root filesystem
+A small FAT based one with the boot code and kernel, a second, read-only ext4-no-journal based one for the root filesystem
 and a third ext4 one that is extended to the full SD-CARD or USB-Drive size on start.
+
+Software containers are stored on the third partition.
+Each OHX Addon gets an ext4 disk quota limited space for configuration: `/var/ohx/config/ADDON_NAME`.
 
 For now the software container engine is Docker (so that [Portainer](https://www.portainer.io/) can be used).
 Generic container installation and management happens via *Portainer* or the `docker` CLI when logged in with SSH.
 
+OHX Addon management can either happen via *Portainer* or via the Setup and Maintenance web interface of OHX.
+
 ### Security
 
-The rootfs is read-only and the data partition filesystem is mounted in a way,
-that it doesn't allow executables to be run.
+The rootfs is read-only and the data partition filesystem is mounted in a way ("noexec"), that it doesn't allow executables to be run.
 This is to prevent attackers from manifesting malicous tools onto disk.
 Attackers still may run malious code from memory by exploiting one of the running services.
 
 Because the docker daemon runs as root, a potential attack scenario includes breaking out of a container.
-All containers running with "--privileged" are especially exploitable.
-
-A mitigation strategy is to keep the kernel and the Docker engine up to date
-and warn on every privileged container.
+Containers running with "--privileged" are an especially exploitable target.
 
 **You should restrict containers to the minimum necessary privileges.**
 
+A mitigation strategy is to keep the kernel and the Docker engine up to date
+and warn on starting up privileged containers.
+
 The following services are running:
+
 * Docker engine. No externally open ports, only a unix socket.
 * chronyd: Time sync daemon. Will periodically request the time from ntp servers.
 * dbus: The dbus system bus. Required for NetworkManager and wifi-captive.
@@ -120,30 +125,36 @@ Fedora IoT as well as openSUSE Kubic both have a boot time of about 5 minutes an
 A non-goal for OHX-OS is a custom build OS, based on [buildroot](https://buildroot.org/).
 This would require a custom update mechanism, CVE tracker and more and is not the focus of the OHX project.
 
+## Updates
+
+The only crucial parts that benefit from updating are the kernel and the docker engine.
+Both require a reboot of the system. Therefore no live update mechanism has been integrated.
+
+Instead, pull out your storage medium (SD-Card, USB Drive) and overwrite the first two partitions
+with the first two partitions of a newly downloaded OS image.
+
+All your data, containers and settings will be kept.
+
 ## Build and Deployment
 
-Prerequirements:
-
-* A dockerhub credentials file (`docker_credentials.inc`) with a credentials line following the pattern "DOCKER_CRED=username:password".
-This is used for pulling container images for the provisioning part.
-* A github credentials file (`github_access_token.inc`) with a credentials line following the pattern "GITHUB_CRED=username:access_token". Create an access token in the OHX organisation page.
+Deploy to hardware:
 
 If you just want to build and deploy to an SD Card, use `rpi3_build_copy_to_mmc.sh`.
-You might want to change the sd-card device file, the default is */dev/mmcblk0*.
+You might want to change the sd-card device file, the default is */dev/mmcblk0*,
+and target machine, default is the Raspberry PI 3.
+
+Maintainer:
+
+*Prerequirements*: A github token file (`github_token.inc`) with a credentials line following the pattern "GITHUB_TOKEN=access_token". Create an access token in the OHX organisation page.
+
+Modify and adapt packages and provisioned containers in `packages.inc`.
 
 Call `build_deploy_all.sh` to build and deploy for all supported architectures.
-
-## Deployment
-
-Prerequirements:
-
-* skopeo
-
-Execute the `deploy.sh` script to:
-
-* Create a new release and add a message with the current date to it.
-* Attach / Upload the generated images
+This will parse the CHANGELOG file and creates a new Github release if necessary
+and attaches all generated, compressed image files.
 
 ## Future plans
 
 * Reduce image size and complexity by not using NetworkManager but connman instead (~80MB less)
+* Switch userspace to busybox (~30MB less)
+* Use podman instead of docker. Removes the root-running daemon. Root is only required for privileged containers. And saves about 20MB.

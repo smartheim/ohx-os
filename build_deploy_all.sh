@@ -9,7 +9,8 @@
 # 
 # Upload all ./releases images and attach them to the latest Github release.
 
-RELEASE_API_URL="https://api.github.com/repos/openhab-nodes/ohx-os/releases"
+readonly RELEASE_API_URL="https://api.github.com/repos/openhab-nodes/ohx-os/releases"
+readonly UPLOAD_API_URL="https://uploads.github.com/repos/openhab-nodes/ohx-os/releases"
 
 if [ -f github_token.inc ]; then
   source ./github_token.inc
@@ -35,10 +36,14 @@ deploy() {
 	local MACHINE="$1"
 	local ARCH="$2"
 	local LATEST_RELEASE="$3"
+
+	local _file="releases/ohx-$MACHINE-$ARCH.img.xz"
+	[ ! -f $_file ] && say "Skip non existing $_file" && return
+
+	local MACHINE_ESC=$(echo $MACHINE | sed -e 's/-/_/g')
 	
 	local rel_id=$(echo $LATEST_RELEASE | jq -r ".id")
 	local assets=$(echo $LATEST_RELEASE | jq -r '.assets[] | with_entries(select(.key == "id" or .key == "name")) | flatten | .[]')
-    local _file="releases/ohx-$MACHINE-$ARCH.img.xz"
 	local sha=$(cat $_file| sha256sum -bz|cut -c -6)
 	local current_tag=$(tagname)
 	
@@ -54,15 +59,15 @@ deploy() {
 		local asset_sha=$(echo $asset_name|cut -d "-" -f5|cut -d "." -f1)
 		local delete_url="$RELEASE_API_URL/assets/$asset_id"
 		
-		if [ "$asset_tagname" = "$current_tag" ] && [ "$asset_machine" = "$MACHINE" ] && [ "$asset_arch" = "$ARCH" ]; then
+		if [ "$asset_tagname" = "$current_tag" ] && [ "$asset_machine" = "$MACHINE_ESC" ] && [ "$asset_arch" = "$ARCH" ]; then
 			if [ "$asset_sha" != "$sha" ]; then
 				say "Checksums not equal. Reupload for $asset_machine ($asset_sha vs $sha). Old ID: $asset_id"
-				curl -sSL -X DELETE "$RELEASE_API_URL" \
+				curl -sSL -X DELETE "$delete_url" \
 					-H "Accept: application/vnd.github.v3+json" \
 					-H "Authorization: token $GITHUB_TOKEN" \
 					-H "Content-Type: application/json"
 			else
-				say "No need to redeploy $asset_machine"
+				say "Identical checksums. No need to redeploy $asset_machine for $ARCH"
 				is_done="1"
 			fi
 			break
@@ -72,8 +77,8 @@ deploy() {
 	[ "$is_done" = "1" ] && return
 		
 	local mimetype=$(file --mime-type -b "$_file") 
-	local upload_url="https://uploads.github.com/repos/openhab-nodes/ohx-os/releases/$rel_id/assets"
-	local basename="ohx-$(echo $MACHINE | sed -e 's/-/_/g')-$ARCH-$current_tag-$sha.img.xz"	
+	local upload_url="$UPLOAD_API_URL/$rel_id/assets"
+	local basename="ohx-$MACHINE_ESC-$ARCH-$current_tag-$sha.img.xz"	
 	local label="OHX $MACHINE Image ($basename)"
 	#label=$(echo $label | curl -Gso /dev/null -w %{url_effective} --data-urlencode @- "" | cut -c 3-)
 	say "Uploading $basename..."
@@ -146,27 +151,6 @@ make_release() {
 	fi
 }
 
-build_all() {
-   build_one uefi x86_64 || err "Failed to build x86_64"
-   build_one uefi aarch64 || err "Failed to build aarch64"
-   build_one beaglebone armv7l || err "Failed to build beaglebone"
-   build_one cubieboard2 armv7l || err "Failed to build cubieboard2"
-   build_one rpi2 armv7l || err "Failed to build rpi2"
-   build_one rpi3 aarch64 || err "Failed to build rpi3"
-   build_one odroid-c2 aarch64 || err "Failed to build odroid-c2"
-   
-   make_release
-   
-   #deploy x86_64 x86_64 "$latest_release"
-   #deploy aarch64 aarch64 "$latest_release"
-   deploy beaglebone armv7l "$latest_release"
-   deploy cubieboard2 armv7l "$latest_release"
-   deploy rpi2 armv7l "$latest_release"
-   deploy rpi3 aarch64 "$latest_release"
-   deploy odroid-c2 aarch64 "$latest_release"
-}
-
-
 need_cmd() {
     if ! command -v "$1" > /dev/null 2>&1; then
         err "need '$1' (command not found) $2"
@@ -202,4 +186,20 @@ if [ -z "$GITHUB_TOKEN" ]; then
 	exit 0
 fi
 
-build_all || exit 1
+build_one uefi x86_64 || err "Failed to build x86_64"
+build_one uefi aarch64 || err "Failed to build aarch64"
+build_one beaglebone armv7l || err "Failed to build beaglebone"
+build_one cubieboard2 armv7l || err "Failed to build cubieboard2"
+build_one rpi2 armv7l || err "Failed to build rpi2"
+build_one rpi3 aarch64 || err "Failed to build rpi3"
+build_one odroid-c2 aarch64 || err "Failed to build odroid-c2"
+
+make_release || err "Failed to create a Github release"
+
+deploy uefi x86_64 "$latest_release"
+deploy uefi aarch64 "$latest_release"
+deploy beaglebone armv7l "$latest_release"
+deploy cubieboard2 armv7l "$latest_release"
+deploy rpi2 armv7l "$latest_release"
+deploy rpi3 aarch64 "$latest_release"
+deploy odroid-c2 aarch64 "$latest_release"

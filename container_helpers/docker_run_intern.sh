@@ -27,10 +27,16 @@ do
 		sleep 1
 		for var in "$@"
 		do
+			case "$var" in
+			*:*) tagname=$(echo $var|cut -d":" -f2) ;;
+			*  ) tagname="latest" ;;
+			esac
+			imagename=$(echo $var|cut -d":" -f1)
 			#set +e
 			#docker image rm "$var" > /dev/null 2>&1
 			#set -e
-			docker pull --platform="linux/$ARCH"  "$var" > /dev/null
+			docker pull --platform="linux/$ARCH" "$var" > /dev/null
+			[ "$tagname" != "latest" ] && echo "$imagename:$tagname to $imagename:latest" && docker tag "$imagename:$tagname" "$imagename:latest"
 			echo -n "Provisioned $var: "
 			docker inspect --format="{{.Architecture}}" "$var"
 		done

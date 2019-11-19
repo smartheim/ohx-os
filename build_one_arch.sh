@@ -52,7 +52,6 @@ readonly repository="https://alpha.de.repo.voidlinux.org"
 readonly voidversion="20191109"
 readonly rootfs_file="void-$MACHINE-$ARCH-root.tar.xz"
 readonly img_file="ohx-$MACHINE-$ARCH.img"
-readonly dockerfile="docker-19.03.4.tgz"
 
 readonly mega="$(echo '2^20' | bc)"
 
@@ -76,32 +75,7 @@ readonly guid_root_aarch64="B921B045-1DF0-41C3-AF44-4C6F280D3FAE"
 readonly guid_linux_data="0FC63DAF-8483-4772-8E79-3D69D8477DE4"
 readonly guid_efi_system="C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
 
-
-case "$ARCH" in
-	"armv7l")
-		readonly pkg_docker_engine="https://download.docker.com/linux/static/stable/armhf/$dockerfile"
-		readonly containers=( "portainer/portainer:linux-arm" )
-		readonly pkgs=( "avahi" "NetworkManager" )
-		readonly repo_suffix="musl"
-		;;
-		
-	"aarch64")
-		readonly pkg_docker_engine="https://download.docker.com/linux/static/stable/aarch64/$dockerfile"
-		readonly containers=( "portainer/portainer:linux-arm64" )
-		readonly pkgs=( "avahi" "NetworkManager" )
-		readonly repo_suffix="aarch64"
-		;;
-		
-	"x86_64")
-		readonly pkg_docker_engine="https://download.docker.com/linux/static/stable/x86_64/$dockerfile"
-		readonly containers=( "portainer/portainer:latest" )
-		readonly pkgs=( "avahi" "NetworkManager" )
-		readonly repo_suffix="musl"
-		;;
-	*)
-		err "Unknown architecture $ARCH"
-esac
-
+source ../packages.inc
 
 prerequirements() {
     need_cmd mkdir
@@ -109,7 +83,8 @@ prerequirements() {
     need_cmd printf
     need_cmd sfdisk
     need_cmd wget
-	need_cmd unshare
+	#need_cmd unshare
+	need_cmd fakeroot
 	need_cmd docker
 	need_cmd mkpasswd
     need_cmd mkfs.fat
@@ -179,6 +154,25 @@ download() {
 		say "Downloading $pkg_docker_engine"
 		ensure wget "$pkg_docker_engine" -O "$ARCH-$dockerfile"
 	fi
+	
+	# Extract docker engine archive into bin directory
+	mkdir -p dockerbin_cache
+	if [ ! -z $pkg_docker_engine ] && [ ! -d dockerbin_cache/$ARCH ]; then
+		rm -rf tmp > /dev/null
+		mkdir -p tmp
+		say "Strip docker binaries"
+		ensure tar xaf $ARCH-$dockerfile --owner=root --group=root --strip-components=1 -C tmp
+		if [ "$ARCH" = "x86_64" ]; then
+			find tmp/ -type f -exec strip "{}" \;
+		else
+			local execute="docker run -v ./tmp:/mnt:Z --rm -t muslcc/x86_64:$ARCH-linux-musl"
+			ensure $execute find /mnt/ -type f -exec strip "{}" \;
+		fi
+		say "Compress docker binaries"
+		ensure ./upx -q tmp/*
+		mkdir -p dockerbin_cache/$ARCH
+		mv tmp/* dockerbin_cache/$ARCH/
+	fi
 }
 
 prepare_rootfs() {
@@ -193,15 +187,18 @@ prepare_rootfs() {
 		mkdir -p "${root_dir_2}_cache_$ARCH_$MACHINE"
 		ensure cp -r ${root_dir_2}/* "${root_dir_2}_cache_$ARCH_$MACHINE/"
 	fi
-	
+}
+
+config_rootfs() {
+
 	# We assume sd-cards for all SOCs, formated with an MBR
 	if [ "$machine" != "uefi" ]; then
 		ensure  echo '/dev/mmcblk0p1 /boot vfat defaults 0 0' >> "$root_dir_2/etc/fstab"
-		ensure  echo '/dev/mmcblk0p3 /var ext4 defaults 0 0' >> "$root_dir_2/etc/fstab"
+		ensure  echo '/dev/mmcblk0p3 /var ext4 defaults,usrjquota=aquota.user,grpjquota=aquota.group,jqfmt=vfsv1,noexec 0 0' >> "$root_dir_2/etc/fstab"
 	else
 		# We assume a GPT disk layout for uefi systems
 		ensure  echo "UUID=$gpt_uuid_boot /boot vfat defaults 0 0" >> "$root_dir_2/etc/fstab"
-		ensure  echo "UUID=$gpt_uuid_data /var ext4 defaults 0 0" >> "$root_dir_2/etc/fstab"
+		ensure  echo "UUID=$gpt_uuid_data /var ext4 defaults,usrjquota=aquota.user,grpjquota=aquota.group,jqfmt=vfsv1,noexec 0 0" >> "$root_dir_2/etc/fstab"
 	fi
 	ensure  echo 'overlay /etc overlay lowerdir=/etc,upperdir=/var/etc_rw,workdir=/var/etc_rw_work 0 0' >> "$root_dir_2/etc/fstab"
 
@@ -219,11 +216,9 @@ prepare_rootfs() {
 	say "Move /var into own partition"
 	ensure mv $root_dir_2/var/* "$root_dir_3/"
 
-	if [ "$MACHINE" = "uefi" ]; then
-		# uefi rootfs do not contain a kernel.
-		# This is installed by "xbps-install -S linux" and moved to "$root_dir_1/" in a later step.
-		say "Postpone kernel installation for $ARCH"
-	else
+	# uefi rootfs do not contain a kernel.
+	# This is installed by "xbps-install -S linux" in the install step
+	if [ "$MACHINE" != "uefi" ]; then
 		# SOC rootfs images have a boot directory
 		ensure mv $root_dir_2/boot/* "$root_dir_1/"
 		# Mount root readonly
@@ -234,26 +229,9 @@ prepare_rootfs() {
 	mkdir -p $root_dir_3/etc_rw
 	mkdir -p $root_dir_3/etc_rw_work
 	
-	# Extract docker engine archive into bin directory
-	if [ ! -z $pkg_docker_engine ] && [ ! -d dockerbin_cache ]; then
-		rm -rf tmp > /dev/null
-		mkdir -p tmp
-		say "Strip docker binaries"
-		ensure tar xaf $ARCH-$dockerfile --owner=root --group=root --strip-components=1 -C tmp
-		if [ "$ARCH" = "x86_64" ]; then
-			find tmp/ -type f -exec strip "{}" \;
-		else
-			local execute="docker run -v ./tmp:/mnt:Z --rm -t muslcc/x86_64:$ARCH-linux-musl"
-			ensure $execute find /mnt/ -type f -exec strip "{}" \;
-		fi
-		say "Compress docker binaries"
-		ensure ./upx -q tmp/*
-		mkdir -p dockerbin_cache
-		mv tmp/* dockerbin_cache/
-	fi
 	# Create service file for docker executable
 	if [ -d dockerbin_cache ]; then
-		ensure cp -r dockerbin_cache/* $root_dir_2/bin
+		ensure cp -r dockerbin_cache/$ARCH/* $root_dir_2/bin
 		ensure mkdir $root_dir_2/etc/sv/dockerd
 		ensure echo "#!/bin/sh" > $root_dir_2/etc/sv/dockerd/run
 		ensure echo "exec /usr/bin/dockerd -l error" >> $root_dir_2/etc/sv/dockerd/run
@@ -263,19 +241,23 @@ prepare_rootfs() {
 	# Network: Nameserver + hostname
 	ensure echo "nameserver 8.8.8.8" > $root_dir_2/etc/resolv.conf
 	ensure echo "nameserver 8.8.4.4" >> $root_dir_2/etc/resolv.conf
-	ensure echo "ohx" >> $root_dir_2/etc/hostname
+	ensure echo "ohx" > $root_dir_2/etc/hostname
 	
 	# Start wpa supplicant with "-u" (dbus interface)
 	mkdir -p $root_dir_2/etc/sv/wpa_supplicant
 	ensure echo "#!/bin/sh" > $root_dir_2/etc/sv/wpa_supplicant/run
 	ensure echo "exec wpa_supplicant -M -c /etc/wpa_supplicant/wpa_supplicant.conf -s -u" >> $root_dir_2/etc/sv/wpa_supplicant/run
-	
+
+	# Service file for starting docker containers
+	mkdir -p $root_dir_2/etc/sv/start_containers
+	ensure cp ../res/start_containers.sh $root_dir_2/etc/sv/start_containers/run
+	ensure chmod +x $root_dir_2/etc/sv/start_containers/run
+
 	# Add network services and provisioning scripts to start up process
-	local services=( chronyd dockerd dbus NetworkManager avahi-daemon sshd ) #dhcpcd
+	local services=( chronyd dockerd dbus NetworkManager avahi-daemon sshd start_containers ) #dhcpcd
 	for service in ${services[@]}; do
 		ensure ln -sf /etc/sv/${service} $root_dir_2/etc/runit/runsvdir/default/
 	done
-	ensure  ln -sf /mnt/data/provisioning/scripts $root_dir_2/etc/runit/runsvdir/default
 	
 	# Replace root password. Add some system users
 	local HASH="root:$(mkpasswd --method=SHA-512 $rootpwd -s ce5Cm/69pJ3/fe):18209:0:99999:7:::"
@@ -339,10 +321,10 @@ install_software_containers() {
 	local container_str=$(join_by " " "${containers[@]}")
 	local TARGET=./container_cache/$ARCH
 	ensure mkdir -p $TARGET
-	ensure mkdir -p ./$root_dir_3/lib/docker
+	ensure mkdir -p $root_dir_3/lib/docker
 	touch $TARGET/ok
-	ensure docker run -v $TARGET:/var/lib/docker:Z --privileged -e ARCH=$ARCH -it docker_run $container_str 
-	cp -r $TARGET/* ./$root_dir_3/lib/docker
+	ensure docker run -v $TARGET:/var/lib/docker:Z --privileged -e ARCH=$ARCH --rm -t docker_run $container_str 
+	cp -r $TARGET/* $root_dir_3/lib/docker
 }
 
 # Removing junk (trims down by about 60 MB)
@@ -359,39 +341,24 @@ cleanup_image() {
 	rm -rf $root_dir_3/empty $root_dir_3/opt $root_dir_3/spool $root_dir_3/mail
 }
 
+create_img_file() {
+	if [[ -z "${SKIP_COMPRESSION}" ]]; then
+		ensure fallocate -l $COUNT "$img_file"
+	else
+		ensure dd if=/dev/zero of="$img_file" bs=$bs count=$(($COUNT/$bs)) conv=fsync status=none
+	fi
+}
+
 create_img() {
 	local partition_size_1=$(($(du -b "$root_dir_1"|tail -n1|cut -f1) + 15 * $mega))
 	local partition_size_2=$(($(du -b "$root_dir_2"|tail -n1|cut -f1) + 50 * $mega))
-	local partition_size_3=$(($(du -b "$root_dir_3"|tail -n1|cut -f1) + 5 * $mega))
+	local partition_size_3=$(($(du -b "$root_dir_3"|tail -n1|cut -f1) + 10 * $mega))
 	local partition_size_1_m=$(($partition_size_1 / $mega))
 	local partition_size_2_m=$(($partition_size_2 / $mega))
 	local partition_size_3_m=$(($partition_size_3 / $mega))
 	
 	# Create the 3 raw images.
-	say "Creating boot partition ($partition_size_1_m MB)"
-	
-	rm -f "$partition_file_1"
-	ensure dd if=/dev/zero "of=$partition_file_1" count=$(($partition_size_1/$bs)) bs="$bs" status=none
-	ensure_quiet mkfs.vfat -n "Boot" "$partition_file_1"
-	ensure pushd "$root_dir_1" > /dev/null
-	# -b batch mode; -Q quits on first error; -s recursive
-	ensure mcopy -bQs -i "$partition_file_1" * "::"
-    ensure popd > /dev/null
-	partition_size_1=$(wc -c "$partition_file_1"|cut -d' ' -f1)
 
-	say "Creating data partition ($partition_size_3_m MB)"
-	rm -f "$partition_file_3"
-	ensure mke2fs -q -d "$root_dir_3" -L "Data" "$partition_file_3" "${partition_size_3_m}m"
-	partition_size_3=$(wc -c "$partition_file_3"|cut -d' ' -f1)
-	
-	say "Creating rootfs partition ($partition_size_2_m MB)"
-
-	# Reserved blocks: 0 (-m), reserved i nodes:0  (-N) ,^large_file,^resize_inode,sparse_super,uninit_bg
-	rm -f "$partition_file_2"
-	ensure_namespaced mke2fs -q -d "$root_dir_2" -O "^has_journal,^large_file,^resize_inode,sparse_super,uninit_bg" \
-	  -N 0 -m 0 -L "Root" "$partition_file_2" "${partition_size_2_m}m"
-	partition_size_2=$(wc -c "$partition_file_2"|cut -d' ' -f1)
-	
 	if [ "$MACHINE" = "uefi" ]; then
 		# Partition start blocks are aligned to a 2048 block boundary.
 		# Computing the total size happens therefore iteratively here.
@@ -403,7 +370,7 @@ create_img() {
 		local COUNT=$(($partition_start4 + $partition_start1)) # Add size of GTP header at the end
 		
 		say "Create GUID Partition Table ($(($COUNT/$block_size)) Blocks)"
-		ensure dd if=/dev/zero of="$img_file" bs=$bs count=$(($COUNT/$bs)) conv=fsync status=none
+		create_img_file
 		
 		local guid_root=$guid_root_x86_64
 		[ "$ARCH" == "aarch64" ] && guid_root=$guid_root_aarch64
@@ -419,12 +386,12 @@ create_img() {
 		local COUNT=$(($partition_size_3 + $partition_size_2 + $partition_size_1 + 2**20))
 		
 		say "Create msdos partition layout ($(($COUNT/$block_size)) Blocks)"
-		ensure dd if=/dev/zero of="$img_file" bs="$bs" count=$(($COUNT/$bs)) status=none
+		create_img_file
 		printf "label: dos
 		type=b, size=$(($partition_size_1/$block_size)), bootable
 		type=83, size=$(($partition_size_2/$block_size))
 		type=83, size=$(($partition_size_3/$block_size))
-		" | sfdisk -q "$img_file"
+		" | sfdisk "$img_file"
 	fi
 	
 	rm -rf tmp > /dev/null
@@ -439,21 +406,30 @@ create_img() {
 		err "Failed to start 'partfs'"
 	fi
 	say "Started partfs with pid $partfs_pid"
-
-	say "Add boot partition to img file"
+	
+	
+	say "Creating boot partition ($partition_size_1_m MB)"
+	rm -f "$partition_file_1"
+	ensure dd if=/dev/zero "of=$partition_file_1" count=$(($partition_size_1/$bs)) bs="$bs" status=none
+	ensure_quiet mkfs.vfat -n "BOOT" "$partition_file_1"
+	ensure pushd "$root_dir_1" > /dev/null
+	# -b batch mode; -Q quits on first error; -s recursive
+	ensure mcopy -bQs -i "$partition_file_1" * "::"
+    ensure popd > /dev/null
 	ensure dd if="$partition_file_1" of="tmp/p1" bs=$bs conv=fsync status=none
-	say "Add root partition to img file"
-	ensure dd if="$partition_file_2" of="tmp/p2" bs=$bs conv=fsync status=none
-	say "Add data partition to img file"
-	ensure dd if="$partition_file_3" of="tmp/p3" bs=$bs conv=fsync status=none
+	rm "$partition_file_1"
 
+	say "Creating data partition ($partition_size_3_m MB)"
+	ensure mke2fs -q -d "$root_dir_3" -O "quota,project,extent,ext_attr" -L "Data" "tmp/p3"
+	
+	say "Creating rootfs partition ($partition_size_2_m MB)"
+	# Reserved blocks: 0 (-m), reserved i nodes:0  (-N)
+	ensure_namespaced mke2fs -q -d "$root_dir_2" -O "^has_journal,^large_file,^resize_inode,sparse_super2,uninit_bg" \
+	  -N 0 -m 0 -L "Root" "tmp/p2"
+	
 	ensure kill $partfs_pid
 	wait $partfs_pid
 	rm -rf tmp/
-	
-	rm "$partition_file_1"
-	rm "$partition_file_2"
-	rm "$partition_file_3"
 	
 	IMAGESIZE=$(ls -lh $img_file|awk '{print $5}')
 	say "Image $img_file size: $IMAGESIZE"
@@ -530,6 +506,7 @@ prepare_rootfs || exit 1
 install_pkgs || exit 1
 install_software_containers || exit 1
 cleanup_image || exit 1
+config_rootfs || exit 1
 create_img || exit 1
 
 end=`date +%s`
