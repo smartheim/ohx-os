@@ -7,6 +7,6 @@ mount -o rw,remount / || emergency_shell
 [ "$(grep "chrony" < /etc/passwd|wc -l)" = "0" ] && useradd chrony
 mount -o ro,remount / || emergency_shell
 
-msg "Add IP 192.168.4.1/24 to wifi link"
-wifi=$(cat /proc/net/wireless | tail -n1 | cut -d ":" -f1)
-ip addr add 192.168.4.1/24 dev $wifi broadcast 255.255.255.0
+wifi=$(ip link | grep DORMANT | cut -d ":" -f2 | tr -d '[:space:]')
+msg "Add IP 192.168.4.1/24 to wifi $wifi link"
+[ ! -z "$wifi" ] && ip addr add 192.168.4.1/24 dev $wifi broadcast 255.255.255.0

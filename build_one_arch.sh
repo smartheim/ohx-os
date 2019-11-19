@@ -190,16 +190,18 @@ download() {
 }
 
 prepare_rootfs() {
-	if [ -d "${root_dir_2}_cache/$ARCH_$MACHINE" ]; then
-		say "Using cached rootfs"
-		ensure rsync -arS ${root_dir_2}_cache/$ARCH_$MACHINE/* "$root_dir_2/"
+	local cache_dir="${root_dir_2}_cache/${ARCH}_${MACHINE}"
+	if [ -d "$cache_dir" ]; then
+		say "Using cached rootfs for ${ARCH}_${MACHINE}"
+		ensure rsync -arS $cache_dir/* "$root_dir_2/"
 	else
-		say "Extracting rootfs"
+		say "Extracting rootfs for ${ARCH}_${MACHINE}"
 		export XZ_DEFAULTS="-T 0"
+		mkdir -p "$cache_dir"
+		rm -rf $root_dir_2/*
 		# We need a usernamespace here. Extracted .tar files should stay respective user-id owned.
-		ensure_namespaced tar xf "$rootfs_file" --numeric-owner --preserve-permissions -C "$root_dir_2"
-		mkdir -p "${root_dir_2}_cache/$ARCH_$MACHINE"
-		ensure rsync -arS ${root_dir_2}/* "${root_dir_2}_cache/$ARCH_$MACHINE/"
+		ensure_namespaced tar xf "$rootfs_file" --numeric-owner --preserve-permissions -C "$cache_dir"
+		ensure_namespaced rsync -ar $cache_dir/* "$root_dir_2"
 	fi
 	
 	say "Move /var and /boot into own partitions"
@@ -213,11 +215,11 @@ config_rootfs() {
 	# We assume sd-cards for all SOCs, formated with an MBR
 	if [ "$machine" != "uefi" ]; then
 		ensure  echo '/dev/mmcblk0p1 /boot vfat defaults 0 0' >> "$root_dir_2/etc/fstab"
-		ensure  echo '/dev/mmcblk0p3 /var ext4 defaults,usrjquota=aquota.user,grpjquota=aquota.group,jqfmt=vfsv1,noexec 0 0' >> "$root_dir_2/etc/fstab"
+		ensure  echo '/dev/mmcblk0p3 /var ext4 defaults,noexec 0 0' >> "$root_dir_2/etc/fstab"
 	else
 		# We assume a GPT disk layout for uefi systems
 		ensure  echo "UUID=$gpt_uuid_boot /boot vfat defaults 0 0" >> "$root_dir_2/etc/fstab"
-		ensure  echo "UUID=$gpt_uuid_data /var ext4 defaults,usrjquota=aquota.user,grpjquota=aquota.group,jqfmt=vfsv1,noexec 0 0" >> "$root_dir_2/etc/fstab"
+		ensure  echo "UUID=$gpt_uuid_data /var ext4 defaults,noexec 0 0" >> "$root_dir_2/etc/fstab"
 	fi
 	ensure  echo 'overlay /etc overlay lowerdir=/etc,upperdir=/var/etc_rw,workdir=/var/etc_rw_work 0 0' >> "$root_dir_2/etc/fstab"
 
@@ -255,16 +257,22 @@ config_rootfs() {
 	
 	# Start wpa supplicant with "-u" (dbus interface)
 	mkdir -p $root_dir_2/etc/sv/wpa_supplicant
-	ensure echo "#!/bin/sh" > $root_dir_2/etc/sv/wpa_supplicant/run
-	ensure echo "exec wpa_supplicant -M -c /etc/wpa_supplicant/wpa_supplicant.conf -s -u" >> $root_dir_2/etc/sv/wpa_supplicant/run
-
+	ensure printf "#!/bin/sh
+	sv check dbus >/dev/null || exit 1
+	exec wpa_supplicant -M -c /etc/wpa_supplicant/wpa_supplicant.conf -s -u
+	" > $root_dir_2/etc/sv/wpa_supplicant/run
+	ensure printf "#!/bin/sh
+	sv check dbus >/dev/null || exit 1
+	sv start wpa_supplicant >/dev/null || exit 1
+	exec NetworkManager -n > /dev/null 2>&1
+	" > $root_dir_2/etc/sv/NetworkManager/run
 	# Service file for starting docker containers
 	mkdir -p $root_dir_2/etc/sv/start_containers
 	ensure cp ../res/start_containers.sh $root_dir_2/etc/sv/start_containers/run
 	ensure chmod +x $root_dir_2/etc/sv/start_containers/run
 
 	# Add network services and provisioning scripts to start up process
-	local services=( chronyd dockerd dbus NetworkManager avahi-daemon sshd start_containers ) #dhcpcd
+	local services=( chronyd dockerd dbus NetworkManager avahi-daemon sshd start_containers wpa_supplicant ) #dhcpcd
 	for service in ${services[@]}; do
 		ensure ln -sf /etc/sv/${service} $root_dir_2/etc/runit/runsvdir/default/
 	done
@@ -325,14 +333,32 @@ install_pkgs() {
 }
 
 install_software_containers() {
-	say "Provision containers"
-	local container_str=$(join_by " " "${containers[@]}")
 	local TARGET=./container_cache/$ARCH
-	ensure mkdir -p $TARGET
-	ensure mkdir -p $root_dir_3/lib/docker
-	touch $TARGET/ok
-	ensure docker run -v $TARGET:/var/lib/docker:Z --privileged -e ARCH=$ARCH --rm -t docker_run $container_str 
-	cp -r $TARGET/* $root_dir_3/lib/docker
+	local provisioned="1"
+	if [ ! -f $TARGET/image/overlay2/repositories.json ]; then
+		provisioned="0"
+	else
+		for container in ${containers[@]}; do
+			say "Check container $container"
+			[ -z "$(grep $container $TARGET/image/overlay2/repositories.json)" ] && provisioned="0"
+		done
+	fi
+	
+	if [ "$provisioned" = "0" ]; then
+		local container_str=$(join_by " " "${containers[@]}")
+		say "Pull and cache containers: $container_str"
+		ensure mkdir -p $TARGET
+		ensure mkdir -p $root_dir_3/lib/docker
+		touch $TARGET/ok
+		ensure docker run -v $TARGET:/var/lib/docker:Z --privileged -e ARCH=$ARCH --rm -t docker_run $container_str 
+	fi
+	say "Provision containers: $container_str"
+	ensure cp -r $TARGET/* $root_dir_3/lib/docker
+	# Test
+	local check_file="$root_dir_3/lib/docker/image/overlay2/repositories.json"
+	if [ ! -f $check_file ]; then
+		err "Container provision check failed. No $check_file"
+	fi
 }
 
 # Removing junk (trims down by about 60 MB)
@@ -350,7 +376,7 @@ cleanup_image() {
 }
 
 create_img_file() {
-	if [[ -z "${SKIP_COMPRESSION}" ]]; then
+	if [ ! -z "${SKIP_COMPRESSION}" ]; then
 		ensure fallocate -l $COUNT "$img_file"
 	else
 		ensure dd if=/dev/zero of="$img_file" bs=$bs count=$(($COUNT/$bs)) conv=fsync status=none
@@ -360,23 +386,23 @@ create_img_file() {
 create_img() {
 	local partition_size_1=$(($(du -b "$root_dir_1"|tail -n1|cut -f1) + 15 * $mega))
 	local partition_size_2=$(($(du -b "$root_dir_2"|tail -n1|cut -f1) + 50 * $mega))
-	local partition_size_3=$(($(du -b "$root_dir_3"|tail -n1|cut -f1) + 10 * $mega))
+	local partition_size_3=$(($(du -b "$root_dir_3"|tail -n1|cut -f1) + 20 * $mega))
 	local partition_size_1_m=$(($partition_size_1 / $mega))
 	local partition_size_2_m=$(($partition_size_2 / $mega))
 	local partition_size_3_m=$(($partition_size_3 / $mega))
 	
 	# Create the 3 raw images.
-
+	block_round=$((2048 * $block_size))
+	partition_start1=$((2048 * $block_size))
+	partition_start2=$(($partition_start1 + $(echo $partition_size_1 | jq -R "tonumber/$block_round|ceil*$block_round")))
+	partition_start3=$(($partition_start2 + $(echo $partition_size_2 | jq -R "tonumber/$block_round|ceil*$block_round")))
+	partition_start4=$(($partition_start3 + $(echo $partition_size_3 | jq -R "tonumber/$block_round|ceil*$block_round")))
+	local COUNT=$(($partition_start4 + $partition_start1)) # Add size of GTP header at the end
+	
 	if [ "$MACHINE" = "uefi" ]; then
 		# Partition start blocks are aligned to a 2048 block boundary.
 		# Computing the total size happens therefore iteratively here.
-		block_round=$((2048 * $block_size))
-		partition_start1=$((2048 * $block_size))
-		partition_start2=$(($partition_start1 + $(echo $partition_size_1 | jq -R "tonumber/$block_round|ceil*$block_round")))
-		partition_start3=$(($partition_start2 + $(echo $partition_size_2 | jq -R "tonumber/$block_round|ceil*$block_round")))
-		partition_start4=$(($partition_start3 + $(echo $partition_size_3 | jq -R "tonumber/$block_round|ceil*$block_round")))
-		local COUNT=$(($partition_start4 + $partition_start1)) # Add size of GTP header at the end
-		
+
 		say "Create GUID Partition Table ($(($COUNT/$block_size)) Blocks)"
 		create_img_file
 		
@@ -388,10 +414,12 @@ create_img() {
 		table-length: 3
 		type=$guid_efi_system, size=$(($partition_size_1/$block_size)), bootable, uuid=$gpt_uuid_boot, name=Boot
 		type=$guid_root, size=$(($partition_size_2/$block_size)), uuid=5B8B1CF4-A735-4256-892E-E3089283E71F, name=Root
-		type=$guid_linux_data, size=$(($partition_size_3/$block_size)), uuid=$gpt_uuid_data, name=Data
+		type=$guid_linux_data, uuid=$gpt_uuid_data, name=Data
 		" | sfdisk -q "$img_file"
 	else
-		local COUNT=$(($partition_size_3 + $partition_size_2 + $partition_size_1 + 2**20))
+		#echo "OLD $COUNT"
+		#COUNT=$(($partition_size_3 + $partition_size_2 + $partition_size_1 + 2**20))
+		#echo "NEW $COUNT"
 		
 		say "Create msdos partition layout ($(($COUNT/$block_size)) Blocks)"
 		create_img_file
@@ -428,7 +456,7 @@ create_img() {
 	rm "$partition_file_1"
 
 	say "Creating data partition ($partition_size_3_m MB)"
-	ensure mke2fs -q -d "$root_dir_3" -O "quota,project,extent,ext_attr" -L "Data" "tmp/p3"
+	ensure mke2fs -q -d "$root_dir_3" -O "quota,extent,ext_attr" -L "Data" "tmp/p3"
 	
 	say "Creating rootfs partition ($partition_size_2_m MB)"
 	# Reserved blocks: 0 (-m), reserved i nodes:0  (-N)

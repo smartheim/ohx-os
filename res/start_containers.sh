@@ -56,7 +56,7 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
 		exit 0
 	fi
 	msg "Wait for Docker daemon... $((10-$i))"
-	sleep 1
+	sleep 2
 done
 
 msg_error "Docker daemon not found"
