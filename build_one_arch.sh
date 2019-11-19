@@ -25,16 +25,17 @@ readonly rootpwd=ohxsmarthome
 [ -z "$MACHINE" ] && echo "You must set MACHINE, for exmple to 'rpi3'" && exit 1
 [ -z "$ARCH" ] && echo "You must set ARCH, for exmple to 'aarch64'" && exit 1
 
-trap "killall partfs > /dev/null; rm -rf tmp/ > /dev/null; exit 1" TERM EXIT
+trap "killall partfs > /dev/null 2>&1; rm -rf tmp/ > /dev/null 2>&1; exit 1" TERM EXIT
 
 # Work directory is "voidlinux"
 mkdir -p voidlinux
 cd voidlinux
 
 # Normalize. Void calls those architectures differently than docker or grub
-DOCKER_ARCH=$ARCH
+STRIP_MUSL_SUFFIX=""
 GRUB_ARCH=$ARCH
-[ "$ARCH" = "armv7l" ] && DOCKER_ARCH=armhf
+STRIP_MUSL_ARCH=$ARCH
+[ "$ARCH" = "armv7l" ] && DOCKER_ARCH=armhf && STRIP_MUSL_SUFFIX="eabihf"
 [ "$ARCH" = "aarch64" ] && GRUB_ARCH=arm64
 
 # Constants
@@ -83,7 +84,7 @@ prerequirements() {
     need_cmd printf
     need_cmd sfdisk
     need_cmd wget
-	#need_cmd unshare
+	need_cmd rsync
 	need_cmd fakeroot
 	need_cmd docker
 	need_cmd mkpasswd
@@ -93,8 +94,12 @@ prerequirements() {
     need_cmd mke2fs "e2fsprogs"
     
     if [ "$machine" == "uefi" ]; then
-		need_cmd grub2-mkconfig
-		need_cmd grub2-install
+		if ! command -v "grub2-mkimage" > /dev/null 2>&1; then
+			grub_mkimage="grub-mkimage"
+		else
+			grub_mkimage="grub2-mkimage"
+		fi
+		need_cmd $grub_mkimage
     fi
     
     # For container provisioning with overlayfs we require the kernel module "overlay"
@@ -122,6 +127,20 @@ prerequirements() {
 	/bin/rm -rf "$img_file.xz" "$img_file" > /dev/null
 	
 	ensure cp -r ../ohx_fs/* $root_dir_3/
+}
+
+strip_bins() {
+	local dir="$1"
+	if [ "$ARCH" = "x86_64" ]; then
+		find $dir -type f -exec strip "{}" \;
+	elif [ "$ARCH" = "aarch64" ] && [ -f /usr/aarch64-linux-gnu/bin/strip ]; then
+		find $dir -type f -exec /usr/aarch64-linux-gnu/bin/strip "{}" \;
+	elif [ "$ARCH" = "armv7l" ] && [ -f /usr/arm-linux-gnueabi/bin/strip ]; then
+		find $dir -type f -exec /usr/arm-linux-gnueabi/bin/strip "{}" \;
+	else
+		local execute="docker run -v ./tmp:/mnt:Z --rm -t muslcc/x86_64:$ARCH-linux-musl${STRIP_MUSL_SUFFIX}"
+		ensure $execute find /mnt/ -type f -exec strip "{}" \;
+	fi
 }
 
 download() {
@@ -162,12 +181,7 @@ download() {
 		mkdir -p tmp
 		say "Strip docker binaries"
 		ensure tar xaf $ARCH-$dockerfile --owner=root --group=root --strip-components=1 -C tmp
-		if [ "$ARCH" = "x86_64" ]; then
-			find tmp/ -type f -exec strip "{}" \;
-		else
-			local execute="docker run -v ./tmp:/mnt:Z --rm -t muslcc/x86_64:$ARCH-linux-musl"
-			ensure $execute find /mnt/ -type f -exec strip "{}" \;
-		fi
+		strip_bins "tmp/"
 		say "Compress docker binaries"
 		ensure ./upx -q tmp/*
 		mkdir -p dockerbin_cache/$ARCH
@@ -176,17 +190,22 @@ download() {
 }
 
 prepare_rootfs() {
-	if [ -d "${root_dir_2}_cache_$ARCH_$MACHINE" ]; then
+	if [ -d "${root_dir_2}_cache/$ARCH_$MACHINE" ]; then
 		say "Using cached rootfs"
-		ensure  cp -r ${root_dir_2}_cache_$ARCH_$MACHINE/* "$root_dir_2/"
+		ensure rsync -arS ${root_dir_2}_cache/$ARCH_$MACHINE/* "$root_dir_2/"
 	else
 		say "Extracting rootfs"
 		export XZ_DEFAULTS="-T 0"
 		# We need a usernamespace here. Extracted .tar files should stay respective user-id owned.
 		ensure_namespaced tar xf "$rootfs_file" --numeric-owner --preserve-permissions -C "$root_dir_2"
-		mkdir -p "${root_dir_2}_cache_$ARCH_$MACHINE"
-		ensure cp -r ${root_dir_2}/* "${root_dir_2}_cache_$ARCH_$MACHINE/"
+		mkdir -p "${root_dir_2}_cache/$ARCH_$MACHINE"
+		ensure rsync -arS ${root_dir_2}/* "${root_dir_2}_cache/$ARCH_$MACHINE/"
 	fi
+	
+	say "Move /var and /boot into own partitions"
+	ensure mv $root_dir_2/var/* "$root_dir_3/"
+	# SOC rootfs images have a boot directory
+	[ "$MACHINE" != "uefi" ] && ensure mv $root_dir_2/boot/* "$root_dir_1/"
 }
 
 config_rootfs() {
@@ -212,18 +231,9 @@ config_rootfs() {
 	ensure cp ../res/runit/* $root_dir_2/etc/runit/core-services/
 	ensure cp ../res/growpart.sh $root_dir_2/usr/bin
 	ensure chmod +x $root_dir_2/usr/bin/growpart.sh
-	
-	say "Move /var into own partition"
-	ensure mv $root_dir_2/var/* "$root_dir_3/"
-
-	# uefi rootfs do not contain a kernel.
-	# This is installed by "xbps-install -S linux" in the install step
-	if [ "$MACHINE" != "uefi" ]; then
-		# SOC rootfs images have a boot directory
-		ensure mv $root_dir_2/boot/* "$root_dir_1/"
-		# Mount root readonly
-		[ -f $root_dir_1/cmdline.txt ] && sed -i -e 's/ rw / ro noswap /' $root_dir_1/cmdline.txt
-	fi
+		
+	# SOC Only: Mount root readonly. UEFI: This is part of the grub.cfg file.
+	[ -f $root_dir_1/cmdline.txt ] && sed -i -e 's/ rw / ro noswap /' $root_dir_1/cmdline.txt
 
 	# Overlayfs directories
 	mkdir -p $root_dir_3/etc_rw
@@ -294,22 +304,20 @@ install_pkgs() {
 		local bootdir=$root_dir_1
 		local modules=( fat exfat part_gpt normal boot linux configfile loopback chain ls search search_label search_fs_uuid search_fs_file test all_video loadenv efifwsetup )
 		mkdir -p $bootdir/EFI/Boot
-		ensure grub2-mkimage -o $bootdir/EFI/Boot/bootx64.efi --prefix=/boot/grub -O $GRUB_ARCH-efi $modules
+		ensure $grub_mkimage -o $bootdir/EFI/Boot/bootx64.efi --prefix=/boot/grub -O $GRUB_ARCH-efi $modules
 		ensure cp ../res/grub.cfg $bootdir/EFI/Boot/grub.cfg
 	fi
 
-	# Remove package cache data and db (~40MB)
 	say "Copy package data into /var"
 	# Move new /var files to 3rd partition (our /var partion)
-	ensure cp -r $pkgs_dir/var/* $root_dir_3/
+	ensure rsync -arS --exclude "cache/xbps*" --exclude "cache/db/xbps*" $pkgs_dir/var/* $root_dir_3/
+	# Remove package cache data and db (~40MB)
 	ensure rm -rf $root_dir_3/cache/xbps* $root_dir_3/db/xbps*/https*
 	pkg_size=$(($(du -b "$pkgs_dir"|tail -n1|cut -f1) / $mega))
-	say "Copy package data into rootfs ($pkg_size MB)"
-	pushd $pkgs_dir > /dev/null
-	ensure_namespaced cp -r $(ls -A | grep -v "var" | grep -v "boot") $root_dir_2/
-	popd > /dev/null
-	ensure rm -rf $root_dir_2/var/*
-	ensure rm -rf $root_dir_2/boot/*
+	say "Copy package data into rootfs (~ $pkg_size MB)"
+	# -r: recursive, -a: archive (keep attributes), -S: handle sparse files
+	ensure rsync -arS --size-only --info=progress2 --exclude var --exclude boot $pkgs_dir/* $root_dir_2/
+	ensure rm -rf $root_dir_2/var/* $root_dir_2/boot/*
 	# Test
 	if [ ! -f $root_dir_2/usr/bin/avahi-daemon ]; then
 		err "Package check failed. No $root_dir_2/usr/bin/avahi-daemon"
@@ -391,7 +399,7 @@ create_img() {
 		type=b, size=$(($partition_size_1/$block_size)), bootable
 		type=83, size=$(($partition_size_2/$block_size))
 		type=83, size=$(($partition_size_3/$block_size))
-		" | sfdisk "$img_file"
+		" | sfdisk -q "$img_file"
 	fi
 	
 	rm -rf tmp > /dev/null
@@ -500,14 +508,14 @@ err() {
 
 start=`date +%s`
 
-prerequirements || exit 1
-download || exit 1
-prepare_rootfs || exit 1
-install_pkgs || exit 1
-install_software_containers || exit 1
-cleanup_image || exit 1
-config_rootfs || exit 1
-create_img || exit 1
+prerequirements
+download
+prepare_rootfs
+install_pkgs
+install_software_containers
+cleanup_image
+config_rootfs
+create_img
 
 end=`date +%s`
 runtime=$((end-start))
