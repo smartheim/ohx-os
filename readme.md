@@ -15,8 +15,8 @@ Supported systems are:
 * The ODroid C2
 * The Cubieboard and Beagleboard
 
-For System-On-A-Chip (SoC) hardware you require an SD-Card or µSD-Card with >= 1 GB capacity.
-UEFI systems require a storage medium with at least 2 GB.
+For System-On-A-Chip (SoC) hardware an SD-Card or µSD-Card with >= 1 GB capacity is required.
+UEFI systems need a storage medium with at least 2 GB.
 
 ## Installation
 
